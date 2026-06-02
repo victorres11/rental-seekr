@@ -17,11 +17,16 @@ from typing import Optional
 RENTCAST_API_URL = "https://api.rentcast.io/v1/listings/rental/long-term"
 
 def get_api_key() -> str:
-    """Load Rentcast API key from credentials file."""
+    """Load Rentcast API key from env var or local credentials file."""
+    env_key = os.getenv("RENTCAST_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
     key_path = Path(os.path.expanduser("~/.clawdbot/credentials/rentcast_api_key"))
     if not key_path.exists():
         raise ValueError(
-            f"Rentcast API key not found at {key_path}\n"
+            "Rentcast API key not found in RENTCAST_API_KEY or at "
+            f"{key_path}\n"
             "Sign up at https://app.rentcast.io/app/api and save your key there."
         )
     return key_path.read_text().strip()

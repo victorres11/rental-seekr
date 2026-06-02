@@ -54,6 +54,7 @@ This app is prepared for Fly.io because it needs persistent SQLite storage for n
 Key runtime env vars:
 - `APP_PASSWORD`
 - `DB_FILE` (defaults to `/data/rental_search.db` in Fly)
+- `RENTCAST_API_KEY`
 - `PORT`
 
 Deploy shape:
