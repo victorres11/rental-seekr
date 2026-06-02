@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+rental_search.db
+seen_listings.json
+state.json
