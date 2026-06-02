@@ -63,4 +63,3 @@ NOTIFY_TARGET = os.getenv("NOTIFY_TARGET", "8526033276")  # Victor's Telegram
 # Shared app access
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("PORT", os.getenv("APP_PORT", "8765")))
-APP_PASSWORD = os.getenv("APP_PASSWORD", "richmond-rentals")

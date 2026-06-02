@@ -15,9 +15,7 @@ Private Richmond rental dashboard with:
    chmod 600 ~/.clawdbot/credentials/rentcast_api_key
    ```
 
-3. Change the shared app password in `config.py`.
-
-4. Test the search:
+3. Test the search:
    ```bash
    cd ~/clawd/rental-search
    ~/clawd/venv/bin/python search.py --dry-run
@@ -30,7 +28,7 @@ Edit `config.py` to adjust:
 - price range
 - move-in window
 - ideal lease timing
-- shared password and host/port
+- host/port
 
 ## Usage
 
@@ -52,7 +50,6 @@ Then open `http://127.0.0.1:8765`.
 This app is prepared for Fly.io because it needs persistent SQLite storage for notes/statuses.
 
 Key runtime env vars:
-- `APP_PASSWORD`
 - `DB_FILE` (defaults to `/data/rental_search.db` in Fly)
 - `RENTCAST_API_KEY`
 - `PORT`

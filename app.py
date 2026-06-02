@@ -3,7 +3,6 @@
 Private Richmond rental dashboard MVP.
 
 Features:
-- shared password login
 - Rentcast sync into SQLite
 - manual listing intake for links from Zillow/Furnished Finder/Airbnb/etc.
 - inbox, shortlist, hidden views
@@ -12,11 +11,9 @@ Features:
 
 import html
 import json
-import secrets
 import sqlite3
 import sys
 from datetime import datetime
-from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -24,7 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import APP_HOST, APP_PASSWORD, APP_PORT, DB_FILE, SEARCH_CONFIG
+from config import APP_HOST, APP_PORT, DB_FILE, SEARCH_CONFIG
 from search import search_all_locations
 
 
@@ -32,7 +29,6 @@ BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / DB_FILE
 VALID_STATUSES = ["new", "maybe", "good", "contacted", "toured", "pass"]
 VALID_TRI_STATE = ["unknown", "yes", "maybe", "no"]
-SESSIONS: set[str] = set()
 
 
 def now_iso() -> str:
@@ -496,7 +492,7 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
       {nav_item('hidden', 'Hidden')}
     </div>
     {body}
-    <div class="footer">Default app password lives in <code>config.py</code>. Change it before exposing this beyond localhost or Tailscale.</div>
+    <div class="footer">Live sync uses Rentcast plus manual listing intake for everything else.</div>
   </div>
 </body>
 </html>"""
@@ -671,39 +667,12 @@ def render_listing_detail(row: sqlite3.Row, flash: str = "") -> bytes:
     return render_layout("Listing detail", body, active="inbox")
 
 
-def render_login(message: str = "") -> bytes:
-    msg = f"<p class='note'>{html.escape(message)}</p>" if message else ""
-    body = f"""
-    <div class="grid" style="grid-template-columns: minmax(0, 520px); justify-content:center">
-      <div class="card">
-        <h2 style="margin-top:0">Shared access</h2>
-        <p class="note">Tiny private app, tiny private security. Change the password in <code>config.py</code> before sharing.</p>
-        {msg}
-        <form method="post" action="/login">
-          <input type="password" name="password" placeholder="Shared password" required>
-          <button type="submit">Enter dashboard</button>
-        </form>
-      </div>
-    </div>
-    """
-    return render_layout("Login", body, active="inbox")
-
-
 class RentalHandler(BaseHTTPRequestHandler):
     def parse_form(self) -> dict[str, str]:
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length).decode("utf-8")
         parsed = parse_qs(raw)
         return {k: v[-1] for k, v in parsed.items()}
-
-    def session_ok(self) -> bool:
-        cookie_header = self.headers.get("Cookie")
-        if not cookie_header:
-            return False
-        jar = cookies.SimpleCookie()
-        jar.load(cookie_header)
-        token = jar.get("session")
-        return bool(token and token.value in SESSIONS)
 
     def redirect(self, location: str) -> None:
         self.send_response(303)
@@ -723,12 +692,6 @@ class RentalHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        if path == "/login":
-            self.send_html(render_login())
-            return
-        if not self.session_ok():
-            self.redirect("/login")
-            return
         if path in ["/", "/inbox"]:
             self.send_html(render_dashboard("inbox"))
             return
@@ -755,23 +718,6 @@ class RentalHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         form = self.parse_form()
-        if path == "/login":
-            if form.get("password") == APP_PASSWORD:
-                token = secrets.token_urlsafe(24)
-                SESSIONS.add(token)
-                cookie = cookies.SimpleCookie()
-                cookie["session"] = token
-                cookie["session"]["path"] = "/"
-                headers = [("Set-Cookie", cookie.output(header="").strip())]
-                content = render_dashboard("inbox", flash="Logged in.")
-                self.send_html(content, extra_headers=headers)
-            else:
-                self.send_html(render_login("Wrong password."))
-            return
-
-        if not self.session_ok():
-            self.redirect("/login")
-            return
 
         if path == "/sync":
             count = sync_rentcast()
