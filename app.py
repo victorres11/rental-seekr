@@ -362,6 +362,7 @@ def update_listing(listing_id: int, form: dict[str, str]) -> None:
     if not row:
         return
     updated = dict(row)
+    quick_action = form.get("quick_action", "").lower()
     updated["status"] = form.get("status", updated["status"]).lower()
     updated["notes"] = form.get("notes", updated["notes"])
     updated["furnished_status"] = form.get("furnished_status", updated["furnished_status"]).lower()
@@ -371,6 +372,9 @@ def update_listing(listing_id: int, form: dict[str, str]) -> None:
     updated["parking"] = form.get("parking", updated["parking"])
     updated["laundry"] = form.get("laundry", updated["laundry"])
     updated["hidden"] = form.get("hidden") == "1"
+    if quick_action == "shortlist":
+        updated["status"] = "good"
+        updated["hidden"] = False
     updated["score"] = compute_score(updated)
     updated["updated_at"] = now_iso()
 
@@ -465,7 +469,10 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
       border:1px solid #b8d9ca; font-size:.9rem;
     }}
     .score {{ font-weight:bold; color:var(--accent); }}
-    form {{ display:grid; gap:10px; }}
+    form {{ display:grid; gap:14px; }}
+    .field {{ display:grid; gap:6px; }}
+    .field-label {{ font-size:.92rem; font-weight:700; color:var(--ink); }}
+    .field-help {{ color:var(--muted); font-size:.88rem; }}
     input, select, textarea, button {{
       font: inherit; padding: 10px 12px; border-radius: 12px; border:1px solid var(--line);
       background:white; color:var(--ink);
@@ -476,6 +483,12 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
     }}
     .row {{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }}
     .row3 {{ display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px; }}
+    .actions {{ display:flex; gap:10px; flex-wrap:wrap; }}
+    .button-secondary {{
+      background: white;
+      color: var(--accent);
+      border-color: #b8d9ca;
+    }}
     .note {{ color:var(--muted); font-size:.92rem; }}
     .empty {{ padding: 28px 0; color: var(--muted); text-align:center; }}
     .footer {{ margin-top:22px; color:var(--muted); font-size:.9rem; }}
@@ -649,30 +662,61 @@ def render_listing_detail(row: sqlite3.Row, flash: str = "") -> bytes:
           <form method="post" action="/listing/update">
             <input type="hidden" name="id" value="{row['id']}">
             <div class="row">
-              <select name="status">
-                {''.join(f"<option value='{s}' {'selected' if row['status']==s else ''}>{s}</option>" for s in VALID_STATUSES)}
-              </select>
-              <select name="furnished_status">
-                {''.join(f"<option value='{s}' {'selected' if row['furnished_status']==s else ''}>{s}</option>" for s in VALID_TRI_STATE)}
-              </select>
+              <label class="field">
+                <span class="field-label">Pipeline status</span>
+                <select name="status">
+                  {''.join(f"<option value='{s}' {'selected' if row['status']==s else ''}>{s}</option>" for s in VALID_STATUSES)}
+                </select>
+                <span class="field-help">Listings show up in Shortlist when status is good, contacted, or toured.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Furnished?</span>
+                <select name="furnished_status">
+                  {''.join(f"<option value='{s}' {'selected' if row['furnished_status']==s else ''}>{s}</option>" for s in VALID_TRI_STATE)}
+                </select>
+              </label>
             </div>
             <div class="row">
-              <select name="utilities_status">
-                {''.join(f"<option value='{s}' {'selected' if row['utilities_status']==s else ''}>{s}</option>" for s in VALID_TRI_STATE)}
-              </select>
-              <select name="hidden">
-                <option value="0" {'selected' if not row['hidden'] else ''}>Visible</option>
-                <option value="1" {'selected' if row['hidden'] else ''}>Hidden</option>
-              </select>
+              <label class="field">
+                <span class="field-label">Utilities included?</span>
+                <select name="utilities_status">
+                  {''.join(f"<option value='{s}' {'selected' if row['utilities_status']==s else ''}>{s}</option>" for s in VALID_TRI_STATE)}
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-label">Visibility</span>
+                <select name="hidden">
+                  <option value="0" {'selected' if not row['hidden'] else ''}>Visible</option>
+                  <option value="1" {'selected' if row['hidden'] else ''}>Hidden</option>
+                </select>
+              </label>
             </div>
-            <input name="available_date_raw" value="{html.escape(row['available_date_raw'] or '')}" placeholder="Available date text">
-            <input name="lease_term_raw" value="{html.escape(row['lease_term_raw'] or '')}" placeholder="Lease term text">
+            <label class="field">
+              <span class="field-label">Available date</span>
+              <input name="available_date_raw" value="{html.escape(row['available_date_raw'] or '')}" placeholder="Available date text">
+            </label>
+            <label class="field">
+              <span class="field-label">Lease term</span>
+              <input name="lease_term_raw" value="{html.escape(row['lease_term_raw'] or '')}" placeholder="Lease term text">
+            </label>
             <div class="row">
-              <input name="parking" value="{html.escape(row['parking'] or '')}" placeholder="Parking">
-              <input name="laundry" value="{html.escape(row['laundry'] or '')}" placeholder="Laundry">
+              <label class="field">
+                <span class="field-label">Parking</span>
+                <input name="parking" value="{html.escape(row['parking'] or '')}" placeholder="Parking">
+              </label>
+              <label class="field">
+                <span class="field-label">Laundry</span>
+                <input name="laundry" value="{html.escape(row['laundry'] or '')}" placeholder="Laundry">
+              </label>
             </div>
-            <textarea name="notes" placeholder="Shared notes">{html.escape(row['notes'] or '')}</textarea>
-            <button type="submit">Save</button>
+            <label class="field">
+              <span class="field-label">Shared notes</span>
+              <textarea name="notes" placeholder="Shared notes">{html.escape(row['notes'] or '')}</textarea>
+            </label>
+            <div class="actions">
+              <button type="submit">Save review</button>
+              <button type="submit" name="quick_action" value="shortlist" class="button-secondary">Add to shortlist</button>
+            </div>
           </form>
         </div>
       </div>
