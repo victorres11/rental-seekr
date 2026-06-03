@@ -295,15 +295,16 @@ def upsert_listing(record: dict) -> None:
     conn.close()
 
 
-def sync_rentcast() -> int:
-    count = 0
+def sync_all_sources() -> dict[str, int]:
+    counts: dict[str, int] = {}
     for listing in search_all_locations():
+        source = listing.get("source") or "unknown"
         upsert_listing(
             {
-                "source": "rentcast",
-                "external_id": listing.get("id"),
+                "source": source,
+                "external_id": listing.get("external_id") or listing.get("id"),
                 "url": listing.get("url"),
-                "title": listing.get("address"),
+                "title": listing.get("title") or listing.get("address"),
                 "address": listing.get("address"),
                 "rent": listing.get("price"),
                 "beds": listing.get("beds"),
@@ -311,6 +312,12 @@ def sync_rentcast() -> int:
                 "sqft": listing.get("sqft"),
                 "property_type": listing.get("property_type"),
                 "image_url": listing.get("image_url"),
+                "available_date_raw": listing.get("available_date_raw", ""),
+                "lease_term_raw": listing.get("lease_term_raw", ""),
+                "furnished_status": listing.get("furnished_status", "unknown"),
+                "utilities_status": listing.get("utilities_status", "unknown"),
+                "parking": listing.get("parking", ""),
+                "laundry": listing.get("laundry", ""),
                 "listed_date": listing.get("listed_date"),
                 "days_on_market": listing.get("days_on_market"),
                 "scraped_at": listing.get("scraped_at"),
@@ -318,8 +325,8 @@ def sync_rentcast() -> int:
                 "manual": False,
             }
         )
-        count += 1
-    return count
+        counts[source] = counts.get(source, 0) + 1
+    return counts
 
 
 def fetch_listings(view: str) -> list[sqlite3.Row]:
@@ -484,7 +491,7 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
         <h1>Richmond Rental Finder</h1>
         <p>Private shortlist for furnished-ish Richmond rentals around August 1 with 6-month fit scoring.</p>
       </div>
-      <div class="note">Shared MVP • Rentcast auto-sync + manual URL intake</div>
+      <div class="note">Shared MVP • multi-source sync + manual URL intake</div>
     </div>
     <div class="nav">
       {nav_item('inbox', 'Inbox')}
@@ -492,7 +499,7 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
       {nav_item('hidden', 'Hidden')}
     </div>
     {body}
-    <div class="footer">Live sync uses Rentcast plus manual listing intake for everything else.</div>
+    <div class="footer">Live sync uses Rentcast and Furnished Finder, plus manual listing intake for everything else.</div>
   </div>
 </body>
 </html>"""
@@ -552,10 +559,10 @@ def render_dashboard(view: str, flash: str = "") -> bytes:
       <div class="stack">
         <div class="card">
           <h3 style="margin-top:0">Sync automated listings</h3>
-          <p class="note">Pull fresh Richmond results from Rentcast and score them into the dashboard.</p>
+          <p class="note">Pull fresh Richmond results from Rentcast and Furnished Finder, then score them into the dashboard.</p>
           <form method="post" action="/sync">
             <input type="hidden" name="view" value="{html.escape(view)}">
-            <button type="submit">Run Rentcast Sync</button>
+            <button type="submit">Run Automated Sync</button>
           </form>
         </div>
         <div class="card">
@@ -720,8 +727,15 @@ class RentalHandler(BaseHTTPRequestHandler):
         form = self.parse_form()
 
         if path == "/sync":
-            count = sync_rentcast()
-            self.send_html(render_dashboard(form.get("view", "inbox"), flash=f"Synced {count} Rentcast listings."))
+            counts = sync_all_sources()
+            if counts:
+                summary = ", ".join(
+                    f"{count} {source.replace('_', ' ').title()} listings"
+                    for source, count in sorted(counts.items())
+                )
+            else:
+                summary = "0 listings"
+            self.send_html(render_dashboard(form.get("view", "inbox"), flash=f"Synced {summary}."))
             return
 
         if path == "/manual":
