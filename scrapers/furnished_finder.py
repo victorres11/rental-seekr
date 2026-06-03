@@ -22,6 +22,10 @@ import requests
 
 DEFAULT_FIRECRAWL_API_URL = "https://api.firecrawl.dev"
 DEFAULT_SEARCH_URL = "https://www.furnishedfinder.com/housing/us--va--richmond"
+STREET_RE = re.compile(
+    r"\b\d{1,5}\s+[A-Z0-9][A-Za-z0-9.'-]*(?:\s+[A-Z0-9][A-Za-z0-9.'-]*){0,6}\s"
+    r"(?:Street|St|Avenue|Ave|Road|Rd|Lane|Ln|Drive|Dr|Boulevard|Blvd|Court|Ct|Place|Pl|Way)\b"
+)
 
 
 def get_firecrawl_credentials() -> tuple[str, str]:
@@ -70,10 +74,118 @@ def scrape_search_page(search_url: str = DEFAULT_SEARCH_URL, max_age_ms: int = 6
     return payload.get("data", {})
 
 
+def scrape_detail_page(detail_url: str, max_age_ms: int = 24 * 60 * 60 * 1000) -> dict:
+    """Fetch a Furnished Finder property detail page as markdown."""
+    api_key, api_url = get_firecrawl_credentials()
+    response = requests.post(
+        f"{api_url}/v1/scrape",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        json={
+            "url": detail_url,
+            "formats": ["markdown"],
+            "maxAge": max_age_ms,
+        },
+        timeout=90,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("success"):
+        raise ValueError(f"Firecrawl scrape failed: {payload.get('error') or 'unknown error'}")
+    return payload.get("data", {})
+
+
 def _clean_block_text(block: str) -> str:
     text = block.replace("\\\\\n\\\\\n", "\n")
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _first_sentence(text: str) -> str:
+    sentence = re.split(r"(?<=[.!?])\s+", text.strip(), maxsplit=1)[0].strip()
+    return sentence[:160]
+
+
+def _extract_neighborhood_name(text: str) -> str:
+    patterns = [
+        (r"\b(Fan district)\b", "Fan District"),
+        (r"\b(?:the )?Fan\b", "Fan District"),
+        (r"\b(Scott's Addition)\b", "Scott's Addition"),
+        (r"\b(Museum District)\b", "Museum District"),
+        (r"\b(Jackson Ward)\b", "Jackson Ward"),
+        (r"\b(Church Hill)\b", "Church Hill"),
+        (r"\b(Arts District)\b", "Arts District"),
+        (r"\b(Monroe Ward)\b", "Monroe Ward"),
+        (r"\b(Shockoe Bottom)\b", "Shockoe Bottom"),
+        (r"\b(Shockoe Slip)\b", "Shockoe Slip"),
+        (r"\b(Carytown)\b", "Carytown"),
+        (r"\b(Manchester)\b", "Manchester"),
+        (r"\b(West End)\b", "West End"),
+        (r"\b(Lakeside)\b", "Lakeside"),
+        (r"\b(Near VCU|VCU(?: MCV)? Campus|VCU health)\b", "Near VCU"),
+        (r"\b(Downtown Richmond)\b", "Downtown Richmond"),
+    ]
+    for pattern, label in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return label
+    generic_match = re.search(
+        r"\b([A-Z][A-Za-z'&.-]+(?:\s+[A-Z][A-Za-z'&.-]+){0,2})\s+neighborhood\b",
+        text,
+    )
+    if generic_match:
+        candidate = generic_match.group(1).strip()
+        if candidate.lower() not in {"this", "our", "north"}:
+            return candidate
+    return ""
+
+
+def enrich_listing_details(listing: dict) -> dict:
+    """Enrich a search-card listing with detail-page data when available."""
+    detail = scrape_detail_page(listing["url"])
+    markdown = detail.get("markdown") or ""
+    if not markdown:
+        return listing
+
+    neighborhood_overview_match = re.search(
+        r"Neighborhood overview\s+(.*?)(?:\n## |\nClosest facilities|\n## Rooms & beds)",
+        markdown,
+        re.DOTALL | re.IGNORECASE,
+    )
+    neighborhood_overview = _clean_block_text(neighborhood_overview_match.group(1)) if neighborhood_overview_match else ""
+
+    space_match = re.search(
+        r"\nSpace\s+(.*?)(?:\nRead more|\nNeighborhood overview|\n## Rooms & beds)",
+        markdown,
+        re.DOTALL | re.IGNORECASE,
+    )
+    space_text = _clean_block_text(space_match.group(1)) if space_match else ""
+
+    description_text = " ".join(part for part in [neighborhood_overview, space_text, listing.get("title", "")] if part).strip()
+    neighborhood = _extract_neighborhood_name(description_text)
+
+    min_stay_match = re.search(r"Minimum stay:\s*([^\n]+)", markdown, re.IGNORECASE)
+    sqft_match = re.search(r"(\d[\d,]*)\s*Sq\.\s*Ft", markdown, re.IGNORECASE)
+    address_match = STREET_RE.search(description_text)
+
+    enriched = dict(listing)
+    if neighborhood:
+        enriched["neighborhood"] = neighborhood
+    if min_stay_match:
+        enriched["lease_term_raw"] = min_stay_match.group(1).strip()
+    if sqft_match:
+        enriched["sqft"] = int(sqft_match.group(1).replace(",", ""))
+    if address_match:
+        street = address_match.group(0).strip()
+        city = listing.get("address", "").strip()
+        enriched["address"] = f"{street}, {city}" if city and city not in street else street
+    enriched["raw"] = {
+        **(listing.get("raw") or {}),
+        "detail_markdown_excerpt": markdown[:4000],
+    }
+    return enriched
 
 
 def _parse_listing_block(block: str) -> Optional[dict]:
@@ -155,6 +267,7 @@ def search_furnished_finder(
     min_beds: int = 0,
     min_price: int = 0,
     max_price: int = 10000,
+    enrich_limit: int = 20,
 ) -> list[dict]:
     """Return normalized Furnished Finder listings from the Richmond search page."""
     data = scrape_search_page(search_url=search_url)
@@ -184,6 +297,14 @@ def search_furnished_finder(
         if price and (price < min_price or price > max_price):
             continue
         listings.append(listing)
+
+    for idx, listing in enumerate(listings):
+        if idx >= enrich_limit:
+            break
+        try:
+            listings[idx] = enrich_listing_details(listing)
+        except Exception:
+            continue
 
     return listings
 

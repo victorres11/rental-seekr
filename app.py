@@ -306,6 +306,7 @@ def sync_all_sources() -> dict[str, int]:
                 "url": listing.get("url"),
                 "title": listing.get("title") or listing.get("address"),
                 "address": listing.get("address"),
+                "neighborhood": listing.get("neighborhood", ""),
                 "rent": listing.get("price"),
                 "beds": listing.get("beds"),
                 "baths": listing.get("baths"),
@@ -530,13 +531,15 @@ def render_listing_card(row: sqlite3.Row) -> str:
         chips.append(f"<span class='chip'>move-in: {html.escape(row['available_date_raw'])}</span>")
     if row["lease_term_raw"]:
         chips.append(f"<span class='chip'>lease: {html.escape(row['lease_term_raw'])}</span>")
+    if row["neighborhood"]:
+        chips.append(f"<span class='chip'>area: {html.escape(row['neighborhood'])}</span>")
 
     return f"""
     <div class="card listing">
       <div class="listing-head">
         <div>
           <h3><a href="/listing?id={row['id']}">{title}</a></h3>
-          <div class="meta">{address}</div>
+          <div class="meta">{address}{' · ' + html.escape(row['neighborhood']) if row['neighborhood'] else ''}</div>
           <div class="mini">{meta}</div>
         </div>
         <div class="score">{row['score']}/100</div>
@@ -627,8 +630,12 @@ def render_listing_detail(row: sqlite3.Row, flash: str = "") -> bytes:
             <div><strong>Sqft</strong><br>{format(int(row['sqft']), ',') if row['sqft'] else 'Unknown'}</div>
           </div>
           <div class="row" style="margin-top:14px">
+            <div><strong>Neighborhood</strong><br>{html.escape(row['neighborhood'] or 'Unknown')}</div>
             <div><strong>Move-in</strong><br>{html.escape(row['available_date_raw'] or 'Unknown')}</div>
+          </div>
+          <div class="row" style="margin-top:14px">
             <div><strong>Lease</strong><br>{html.escape(row['lease_term_raw'] or 'Unknown')}</div>
+            <div><strong>Utilities</strong><br>{html.escape(row['utilities_status'] or 'Unknown')}</div>
           </div>
           <div class="row" style="margin-top:14px">
             <div><strong>Parking</strong><br>{html.escape(row['parking'] or 'Unknown')}</div>
