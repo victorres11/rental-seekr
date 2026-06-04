@@ -1,5 +1,6 @@
+.firecrawl/
 __pycache__/
 *.pyc
-rental_search.db
-seen_listings.json
+*.db
 state.json
+seen_listings.json

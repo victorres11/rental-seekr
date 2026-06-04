@@ -3,7 +3,6 @@
 Private Richmond rental dashboard MVP.
 
 Features:
-- shared password login
 - Rentcast sync into SQLite
 - manual listing intake for links from Zillow/Furnished Finder/Airbnb/etc.
 - inbox, shortlist, hidden views
@@ -12,11 +11,9 @@ Features:
 
 import html
 import json
-import secrets
 import sqlite3
 import sys
 from datetime import datetime
-from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -24,7 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import APP_HOST, APP_PASSWORD, APP_PORT, DB_FILE, SEARCH_CONFIG
+from config import APP_HOST, APP_PORT, DB_FILE, SEARCH_CONFIG
 from search import search_all_locations
 
 
@@ -32,7 +29,6 @@ BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / DB_FILE
 VALID_STATUSES = ["new", "maybe", "good", "contacted", "toured", "pass"]
 VALID_TRI_STATE = ["unknown", "yes", "maybe", "no"]
-SESSIONS: set[str] = set()
 
 
 def now_iso() -> str:
@@ -299,22 +295,30 @@ def upsert_listing(record: dict) -> None:
     conn.close()
 
 
-def sync_rentcast() -> int:
-    count = 0
+def sync_all_sources() -> dict[str, int]:
+    counts: dict[str, int] = {}
     for listing in search_all_locations():
+        source = listing.get("source") or "unknown"
         upsert_listing(
             {
-                "source": "rentcast",
-                "external_id": listing.get("id"),
+                "source": source,
+                "external_id": listing.get("external_id") or listing.get("id"),
                 "url": listing.get("url"),
-                "title": listing.get("address"),
+                "title": listing.get("title") or listing.get("address"),
                 "address": listing.get("address"),
+                "neighborhood": listing.get("neighborhood", ""),
                 "rent": listing.get("price"),
                 "beds": listing.get("beds"),
                 "baths": listing.get("baths"),
                 "sqft": listing.get("sqft"),
                 "property_type": listing.get("property_type"),
                 "image_url": listing.get("image_url"),
+                "available_date_raw": listing.get("available_date_raw", ""),
+                "lease_term_raw": listing.get("lease_term_raw", ""),
+                "furnished_status": listing.get("furnished_status", "unknown"),
+                "utilities_status": listing.get("utilities_status", "unknown"),
+                "parking": listing.get("parking", ""),
+                "laundry": listing.get("laundry", ""),
                 "listed_date": listing.get("listed_date"),
                 "days_on_market": listing.get("days_on_market"),
                 "scraped_at": listing.get("scraped_at"),
@@ -322,8 +326,8 @@ def sync_rentcast() -> int:
                 "manual": False,
             }
         )
-        count += 1
-    return count
+        counts[source] = counts.get(source, 0) + 1
+    return counts
 
 
 def fetch_listings(view: str) -> list[sqlite3.Row]:
@@ -358,6 +362,7 @@ def update_listing(listing_id: int, form: dict[str, str]) -> None:
     if not row:
         return
     updated = dict(row)
+    quick_action = form.get("quick_action", "").lower()
     updated["status"] = form.get("status", updated["status"]).lower()
     updated["notes"] = form.get("notes", updated["notes"])
     updated["furnished_status"] = form.get("furnished_status", updated["furnished_status"]).lower()
@@ -367,6 +372,9 @@ def update_listing(listing_id: int, form: dict[str, str]) -> None:
     updated["parking"] = form.get("parking", updated["parking"])
     updated["laundry"] = form.get("laundry", updated["laundry"])
     updated["hidden"] = form.get("hidden") == "1"
+    if quick_action == "shortlist":
+        updated["status"] = "good"
+        updated["hidden"] = False
     updated["score"] = compute_score(updated)
     updated["updated_at"] = now_iso()
 
@@ -461,7 +469,10 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
       border:1px solid #b8d9ca; font-size:.9rem;
     }}
     .score {{ font-weight:bold; color:var(--accent); }}
-    form {{ display:grid; gap:10px; }}
+    form {{ display:grid; gap:14px; }}
+    .field {{ display:grid; gap:6px; }}
+    .field-label {{ font-size:.92rem; font-weight:700; color:var(--ink); }}
+    .field-help {{ color:var(--muted); font-size:.88rem; }}
     input, select, textarea, button {{
       font: inherit; padding: 10px 12px; border-radius: 12px; border:1px solid var(--line);
       background:white; color:var(--ink);
@@ -472,6 +483,12 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
     }}
     .row {{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }}
     .row3 {{ display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px; }}
+    .actions {{ display:flex; gap:10px; flex-wrap:wrap; }}
+    .button-secondary {{
+      background: white;
+      color: var(--accent);
+      border-color: #b8d9ca;
+    }}
     .note {{ color:var(--muted); font-size:.92rem; }}
     .empty {{ padding: 28px 0; color: var(--muted); text-align:center; }}
     .footer {{ margin-top:22px; color:var(--muted); font-size:.9rem; }}
@@ -488,7 +505,7 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
         <h1>Richmond Rental Finder</h1>
         <p>Private shortlist for furnished-ish Richmond rentals around August 1 with 6-month fit scoring.</p>
       </div>
-      <div class="note">Shared MVP • Rentcast auto-sync + manual URL intake</div>
+      <div class="note">Shared MVP • multi-source sync + manual URL intake</div>
     </div>
     <div class="nav">
       {nav_item('inbox', 'Inbox')}
@@ -496,7 +513,7 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
       {nav_item('hidden', 'Hidden')}
     </div>
     {body}
-    <div class="footer">Default app password lives in <code>config.py</code>. Change it before exposing this beyond localhost or Tailscale.</div>
+    <div class="footer">Live sync uses Rentcast and Furnished Finder, plus manual listing intake for everything else.</div>
   </div>
 </body>
 </html>"""
@@ -527,13 +544,15 @@ def render_listing_card(row: sqlite3.Row) -> str:
         chips.append(f"<span class='chip'>move-in: {html.escape(row['available_date_raw'])}</span>")
     if row["lease_term_raw"]:
         chips.append(f"<span class='chip'>lease: {html.escape(row['lease_term_raw'])}</span>")
+    if row["neighborhood"]:
+        chips.append(f"<span class='chip'>area: {html.escape(row['neighborhood'])}</span>")
 
     return f"""
     <div class="card listing">
       <div class="listing-head">
         <div>
           <h3><a href="/listing?id={row['id']}">{title}</a></h3>
-          <div class="meta">{address}</div>
+          <div class="meta">{address}{' · ' + html.escape(row['neighborhood']) if row['neighborhood'] else ''}</div>
           <div class="mini">{meta}</div>
         </div>
         <div class="score">{row['score']}/100</div>
@@ -556,10 +575,10 @@ def render_dashboard(view: str, flash: str = "") -> bytes:
       <div class="stack">
         <div class="card">
           <h3 style="margin-top:0">Sync automated listings</h3>
-          <p class="note">Pull fresh Richmond results from Rentcast and score them into the dashboard.</p>
+          <p class="note">Pull fresh Richmond results from Rentcast and Furnished Finder, then score them into the dashboard.</p>
           <form method="post" action="/sync">
             <input type="hidden" name="view" value="{html.escape(view)}">
-            <button type="submit">Run Rentcast Sync</button>
+            <button type="submit">Run Automated Sync</button>
           </form>
         </div>
         <div class="card">
@@ -624,8 +643,12 @@ def render_listing_detail(row: sqlite3.Row, flash: str = "") -> bytes:
             <div><strong>Sqft</strong><br>{format(int(row['sqft']), ',') if row['sqft'] else 'Unknown'}</div>
           </div>
           <div class="row" style="margin-top:14px">
+            <div><strong>Neighborhood</strong><br>{html.escape(row['neighborhood'] or 'Unknown')}</div>
             <div><strong>Move-in</strong><br>{html.escape(row['available_date_raw'] or 'Unknown')}</div>
+          </div>
+          <div class="row" style="margin-top:14px">
             <div><strong>Lease</strong><br>{html.escape(row['lease_term_raw'] or 'Unknown')}</div>
+            <div><strong>Utilities</strong><br>{html.escape(row['utilities_status'] or 'Unknown')}</div>
           </div>
           <div class="row" style="margin-top:14px">
             <div><strong>Parking</strong><br>{html.escape(row['parking'] or 'Unknown')}</div>
@@ -639,30 +662,61 @@ def render_listing_detail(row: sqlite3.Row, flash: str = "") -> bytes:
           <form method="post" action="/listing/update">
             <input type="hidden" name="id" value="{row['id']}">
             <div class="row">
-              <select name="status">
-                {''.join(f"<option value='{s}' {'selected' if row['status']==s else ''}>{s}</option>" for s in VALID_STATUSES)}
-              </select>
-              <select name="furnished_status">
-                {''.join(f"<option value='{s}' {'selected' if row['furnished_status']==s else ''}>{s}</option>" for s in VALID_TRI_STATE)}
-              </select>
+              <label class="field">
+                <span class="field-label">Pipeline status</span>
+                <select name="status">
+                  {''.join(f"<option value='{s}' {'selected' if row['status']==s else ''}>{s}</option>" for s in VALID_STATUSES)}
+                </select>
+                <span class="field-help">Listings show up in Shortlist when status is good, contacted, or toured.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Furnished?</span>
+                <select name="furnished_status">
+                  {''.join(f"<option value='{s}' {'selected' if row['furnished_status']==s else ''}>{s}</option>" for s in VALID_TRI_STATE)}
+                </select>
+              </label>
             </div>
             <div class="row">
-              <select name="utilities_status">
-                {''.join(f"<option value='{s}' {'selected' if row['utilities_status']==s else ''}>{s}</option>" for s in VALID_TRI_STATE)}
-              </select>
-              <select name="hidden">
-                <option value="0" {'selected' if not row['hidden'] else ''}>Visible</option>
-                <option value="1" {'selected' if row['hidden'] else ''}>Hidden</option>
-              </select>
+              <label class="field">
+                <span class="field-label">Utilities included?</span>
+                <select name="utilities_status">
+                  {''.join(f"<option value='{s}' {'selected' if row['utilities_status']==s else ''}>{s}</option>" for s in VALID_TRI_STATE)}
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-label">Visibility</span>
+                <select name="hidden">
+                  <option value="0" {'selected' if not row['hidden'] else ''}>Visible</option>
+                  <option value="1" {'selected' if row['hidden'] else ''}>Hidden</option>
+                </select>
+              </label>
             </div>
-            <input name="available_date_raw" value="{html.escape(row['available_date_raw'] or '')}" placeholder="Available date text">
-            <input name="lease_term_raw" value="{html.escape(row['lease_term_raw'] or '')}" placeholder="Lease term text">
+            <label class="field">
+              <span class="field-label">Available date</span>
+              <input name="available_date_raw" value="{html.escape(row['available_date_raw'] or '')}" placeholder="Available date text">
+            </label>
+            <label class="field">
+              <span class="field-label">Lease term</span>
+              <input name="lease_term_raw" value="{html.escape(row['lease_term_raw'] or '')}" placeholder="Lease term text">
+            </label>
             <div class="row">
-              <input name="parking" value="{html.escape(row['parking'] or '')}" placeholder="Parking">
-              <input name="laundry" value="{html.escape(row['laundry'] or '')}" placeholder="Laundry">
+              <label class="field">
+                <span class="field-label">Parking</span>
+                <input name="parking" value="{html.escape(row['parking'] or '')}" placeholder="Parking">
+              </label>
+              <label class="field">
+                <span class="field-label">Laundry</span>
+                <input name="laundry" value="{html.escape(row['laundry'] or '')}" placeholder="Laundry">
+              </label>
             </div>
-            <textarea name="notes" placeholder="Shared notes">{html.escape(row['notes'] or '')}</textarea>
-            <button type="submit">Save</button>
+            <label class="field">
+              <span class="field-label">Shared notes</span>
+              <textarea name="notes" placeholder="Shared notes">{html.escape(row['notes'] or '')}</textarea>
+            </label>
+            <div class="actions">
+              <button type="submit">Save review</button>
+              <button type="submit" name="quick_action" value="shortlist" class="button-secondary">Add to shortlist</button>
+            </div>
           </form>
         </div>
       </div>
@@ -671,39 +725,12 @@ def render_listing_detail(row: sqlite3.Row, flash: str = "") -> bytes:
     return render_layout("Listing detail", body, active="inbox")
 
 
-def render_login(message: str = "") -> bytes:
-    msg = f"<p class='note'>{html.escape(message)}</p>" if message else ""
-    body = f"""
-    <div class="grid" style="grid-template-columns: minmax(0, 520px); justify-content:center">
-      <div class="card">
-        <h2 style="margin-top:0">Shared access</h2>
-        <p class="note">Tiny private app, tiny private security. Change the password in <code>config.py</code> before sharing.</p>
-        {msg}
-        <form method="post" action="/login">
-          <input type="password" name="password" placeholder="Shared password" required>
-          <button type="submit">Enter dashboard</button>
-        </form>
-      </div>
-    </div>
-    """
-    return render_layout("Login", body, active="inbox")
-
-
 class RentalHandler(BaseHTTPRequestHandler):
     def parse_form(self) -> dict[str, str]:
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length).decode("utf-8")
         parsed = parse_qs(raw)
         return {k: v[-1] for k, v in parsed.items()}
-
-    def session_ok(self) -> bool:
-        cookie_header = self.headers.get("Cookie")
-        if not cookie_header:
-            return False
-        jar = cookies.SimpleCookie()
-        jar.load(cookie_header)
-        token = jar.get("session")
-        return bool(token and token.value in SESSIONS)
 
     def redirect(self, location: str) -> None:
         self.send_response(303)
@@ -723,12 +750,6 @@ class RentalHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        if path == "/login":
-            self.send_html(render_login())
-            return
-        if not self.session_ok():
-            self.redirect("/login")
-            return
         if path in ["/", "/inbox"]:
             self.send_html(render_dashboard("inbox"))
             return
@@ -755,27 +776,17 @@ class RentalHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         form = self.parse_form()
-        if path == "/login":
-            if form.get("password") == APP_PASSWORD:
-                token = secrets.token_urlsafe(24)
-                SESSIONS.add(token)
-                cookie = cookies.SimpleCookie()
-                cookie["session"] = token
-                cookie["session"]["path"] = "/"
-                headers = [("Set-Cookie", cookie.output(header="").strip())]
-                content = render_dashboard("inbox", flash="Logged in.")
-                self.send_html(content, extra_headers=headers)
-            else:
-                self.send_html(render_login("Wrong password."))
-            return
-
-        if not self.session_ok():
-            self.redirect("/login")
-            return
 
         if path == "/sync":
-            count = sync_rentcast()
-            self.send_html(render_dashboard(form.get("view", "inbox"), flash=f"Synced {count} Rentcast listings."))
+            counts = sync_all_sources()
+            if counts:
+                summary = ", ".join(
+                    f"{count} {source.replace('_', ' ').title()} listings"
+                    for source, count in sorted(counts.items())
+                )
+            else:
+                summary = "0 listings"
+            self.send_html(render_dashboard(form.get("view", "inbox"), flash=f"Synced {summary}."))
             return
 
         if path == "/manual":

@@ -16,6 +16,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import SEARCH_CONFIG, STATE_FILE, SEEN_LISTINGS_FILE
+from scrapers.furnished_finder import search_furnished_finder
 from scrapers.rentcast import search_rentals
 
 
@@ -92,8 +93,20 @@ def search_all_locations() -> list[dict]:
             all_listings.extend(results)
         except Exception as e:
             print(f"  Error searching Rentcast: {e}")
+
+    try:
+        print("Searching Furnished Finder...")
+        furnished_results = search_furnished_finder(
+            min_beds=config.get("min_beds", 0),
+            min_price=config.get("min_price", 0),
+            max_price=config.get("max_price", 10000),
+        )
+        print(f"  Found {len(furnished_results)} listings from Furnished Finder")
+        all_listings.extend(furnished_results)
+    except Exception as e:
+        print(f"  Error searching Furnished Finder: {e}")
     
-    # Deduplicate by listing ID
+    # Deduplicate by listing ID across sources.
     seen_ids = set()
     unique_listings = []
     for listing in all_listings:
