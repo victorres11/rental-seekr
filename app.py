@@ -434,6 +434,15 @@ def fetch_listing(listing_id: int) -> Optional[sqlite3.Row]:
     return row
 
 
+def count_shortlist_listings() -> int:
+    conn = get_db()
+    count = conn.execute(
+        "SELECT COUNT(*) FROM listings WHERE hidden = 0 AND status IN ('good', 'contacted', 'toured')"
+    ).fetchone()[0]
+    conn.close()
+    return int(count)
+
+
 def update_listing(listing_id: int, form: dict[str, str]) -> str:
     row = fetch_listing(listing_id)
     if not row:
@@ -492,10 +501,15 @@ def update_listing(listing_id: int, form: dict[str, str]) -> str:
     return flash
 
 
-def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
+def render_layout(title: str, body: str, active: str = "inbox", shortlist_count: int = 0) -> bytes:
     def nav_item(name: str, label: str) -> str:
         cls = "nav-link active" if active == name else "nav-link"
-        return f'<a class="{cls}" href="/{name}">{label}</a>'
+        count_html = (
+            f"<span class='nav-count'>{shortlist_count}</span>"
+            if name == "shortlist"
+            else ""
+        )
+        return f'<a class="{cls}" href="/{name}"><span>{label}</span>{count_html}</a>'
 
     html_doc = f"""<!doctype html>
 <html lang="en">
@@ -532,10 +546,19 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
     .hero p {{ margin:.35rem 0 0; color: var(--muted); }}
     .nav {{ display:flex; gap:10px; flex-wrap:wrap; margin: 18px 0 24px; }}
     .nav-link {{
+      display:inline-flex; align-items:center; gap:8px;
       text-decoration:none; padding:10px 14px; border-radius:999px;
       background:#efe8da; color:var(--ink); border:1px solid var(--line);
     }}
     .nav-link.active {{ background:var(--accent); color:white; border-color:var(--accent); }}
+    .nav-count {{
+      display:inline-flex; align-items:center; justify-content:center;
+      min-width: 1.8rem; padding: 2px 8px; border-radius: 999px;
+      background: rgba(31, 42, 36, 0.08); color: inherit; font-size: .88rem; font-weight: 700;
+    }}
+    .nav-link.active .nav-count {{
+      background: rgba(255, 255, 255, 0.2);
+    }}
     .grid {{ display:grid; grid-template-columns: 1.55fr .95fr; gap:20px; }}
     .stack {{ display:grid; gap:18px; }}
     .card {{
@@ -697,6 +720,7 @@ def render_listing_card(row: sqlite3.Row, view: str) -> str:
 
 def render_dashboard(view: str, flash: str = "") -> bytes:
     rows = fetch_listings(view)
+    shortlist_count = count_shortlist_listings()
     latest_sync = fetch_latest_sync_run()
     cards = "".join(render_listing_card(row, view) for row in rows) or '<div class="card empty">No listings here yet.</div>'
     flash_html = f'<div class="card">{html.escape(flash)}</div>' if flash else ""
@@ -759,10 +783,16 @@ def render_dashboard(view: str, flash: str = "") -> bytes:
       </div>
     </div>
     """
-    return render_layout(f"Richmond Rental Finder - {view.title()}", body, active=view)
+    return render_layout(
+        f"Richmond Rental Finder - {view.title()}",
+        body,
+        active=view,
+        shortlist_count=shortlist_count,
+    )
 
 
 def render_listing_detail(row: sqlite3.Row, flash: str = "") -> bytes:
+    shortlist_count = count_shortlist_listings()
     chips = []
     for label, value in [
         ("source", row["source"]),
@@ -876,7 +906,7 @@ def render_listing_detail(row: sqlite3.Row, flash: str = "") -> bytes:
       </div>
     </div>
     """
-    return render_layout("Listing detail", body, active="inbox")
+    return render_layout("Listing detail", body, active="inbox", shortlist_count=shortlist_count)
 
 
 class RentalHandler(BaseHTTPRequestHandler):
