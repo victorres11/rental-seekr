@@ -35,6 +35,16 @@ def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def format_timestamp(value: Optional[str]) -> str:
+    if not value:
+        return "Unknown"
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return dt.strftime("%b %-d, %Y at %-I:%M %p")
+
+
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -74,6 +84,8 @@ def init_db() -> None:
             listed_date TEXT,
             days_on_market INTEGER,
             scraped_at TEXT,
+            first_synced_at TEXT,
+            last_synced_at TEXT,
             raw_json TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -87,6 +99,26 @@ def init_db() -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_source_url "
         "ON listings(source, url)"
+    )
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(listings)").fetchall()
+    }
+    if "first_synced_at" not in columns:
+        conn.execute("ALTER TABLE listings ADD COLUMN first_synced_at TEXT")
+    if "last_synced_at" not in columns:
+        conn.execute("ALTER TABLE listings ADD COLUMN last_synced_at TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            status TEXT NOT NULL,
+            total_count INTEGER NOT NULL DEFAULT 0,
+            summary TEXT NOT NULL DEFAULT '',
+            error_text TEXT NOT NULL DEFAULT ''
+        )
+        """
     )
     conn.commit()
     conn.close()
@@ -203,8 +235,14 @@ def upsert_listing(record: dict) -> None:
         "listed_date": record.get("listed_date"),
         "days_on_market": int(record["days_on_market"]) if record.get("days_on_market") not in (None, "") else None,
         "scraped_at": record.get("scraped_at"),
+        "first_synced_at": record.get("first_synced_at"),
+        "last_synced_at": record.get("last_synced_at"),
         "raw_json": json.dumps(record.get("raw")) if record.get("raw") is not None else None,
     }
+    if not normalized["manual"]:
+        sync_time = record.get("last_synced_at") or now_iso()
+        normalized["last_synced_at"] = sync_time
+        normalized["first_synced_at"] = record.get("first_synced_at") or sync_time
     normalized["score"] = compute_score(normalized)
     normalized["updated_at"] = now_iso()
     normalized["created_at"] = record.get("created_at") or normalized["updated_at"]
@@ -213,13 +251,13 @@ def upsert_listing(record: dict) -> None:
     existing = None
     if normalized["external_id"]:
         existing = conn.execute(
-            "SELECT id, notes, status, hidden, furnished_status, utilities_status, available_date_raw, lease_term_raw, parking, laundry "
+            "SELECT id, notes, status, hidden, furnished_status, utilities_status, available_date_raw, lease_term_raw, parking, laundry, first_synced_at, last_synced_at "
             "FROM listings WHERE source = ? AND external_id = ?",
             (normalized["source"], normalized["external_id"]),
         ).fetchone()
     if not existing:
         existing = conn.execute(
-            "SELECT id, notes, status, hidden, furnished_status, utilities_status, available_date_raw, lease_term_raw, parking, laundry "
+            "SELECT id, notes, status, hidden, furnished_status, utilities_status, available_date_raw, lease_term_raw, parking, laundry, first_synced_at, last_synced_at "
             "FROM listings WHERE source = ? AND url = ?",
             (normalized["source"], normalized["url"]),
         ).fetchone()
@@ -239,6 +277,12 @@ def upsert_listing(record: dict) -> None:
         ]:
             if existing[field] not in (None, "", 0):
                 normalized[field] = existing[field]
+        if normalized["manual"]:
+            normalized["first_synced_at"] = existing["first_synced_at"]
+            normalized["last_synced_at"] = existing["last_synced_at"]
+        else:
+            normalized["first_synced_at"] = existing["first_synced_at"] or normalized["first_synced_at"]
+            normalized["last_synced_at"] = normalized["last_synced_at"] or existing["last_synced_at"]
         normalized["score"] = compute_score(normalized)
         conn.execute(
             """
@@ -268,6 +312,8 @@ def upsert_listing(record: dict) -> None:
                 listed_date = :listed_date,
                 days_on_market = :days_on_market,
                 scraped_at = :scraped_at,
+                first_synced_at = :first_synced_at,
+                last_synced_at = :last_synced_at,
                 raw_json = :raw_json,
                 updated_at = :updated_at
             WHERE id = :id
@@ -281,12 +327,14 @@ def upsert_listing(record: dict) -> None:
                 source, external_id, url, title, address, neighborhood, rent, beds, baths, sqft,
                 property_type, image_url, available_date_raw, lease_term_raw, furnished_status,
                 utilities_status, parking, laundry, score, status, notes, hidden, manual,
-                last_seen_at, listed_date, days_on_market, scraped_at, raw_json, created_at, updated_at
+                last_seen_at, listed_date, days_on_market, scraped_at, first_synced_at, last_synced_at,
+                raw_json, created_at, updated_at
             ) VALUES (
                 :source, :external_id, :url, :title, :address, :neighborhood, :rent, :beds, :baths, :sqft,
                 :property_type, :image_url, :available_date_raw, :lease_term_raw, :furnished_status,
                 :utilities_status, :parking, :laundry, :score, :status, :notes, :hidden, :manual,
-                :last_seen_at, :listed_date, :days_on_market, :scraped_at, :raw_json, :created_at, :updated_at
+                :last_seen_at, :listed_date, :days_on_market, :scraped_at, :first_synced_at, :last_synced_at,
+                :raw_json, :created_at, :updated_at
             )
             """,
             normalized,
@@ -297,6 +345,7 @@ def upsert_listing(record: dict) -> None:
 
 def sync_all_sources() -> dict[str, int]:
     counts: dict[str, int] = {}
+    sync_time = now_iso()
     for listing in search_all_locations():
         source = listing.get("source") or "unknown"
         upsert_listing(
@@ -322,12 +371,35 @@ def sync_all_sources() -> dict[str, int]:
                 "listed_date": listing.get("listed_date"),
                 "days_on_market": listing.get("days_on_market"),
                 "scraped_at": listing.get("scraped_at"),
+                "last_synced_at": sync_time,
                 "raw": listing.get("raw"),
                 "manual": False,
             }
         )
         counts[source] = counts.get(source, 0) + 1
     return counts
+
+
+def record_sync_run(started_at: str, status: str, total_count: int, summary: str, error_text: str = "") -> None:
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO sync_runs (started_at, finished_at, status, total_count, summary, error_text)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (started_at, now_iso(), status, total_count, summary, error_text),
+    )
+    conn.commit()
+    conn.close()
+
+
+def fetch_latest_sync_run() -> Optional[sqlite3.Row]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM sync_runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row
 
 
 def fetch_listings(view: str) -> list[sqlite3.Row]:
@@ -546,6 +618,16 @@ def render_listing_card(row: sqlite3.Row) -> str:
         chips.append(f"<span class='chip'>lease: {html.escape(row['lease_term_raw'])}</span>")
     if row["neighborhood"]:
         chips.append(f"<span class='chip'>area: {html.escape(row['neighborhood'])}</span>")
+    if row["first_synced_at"]:
+        chips.append(f"<span class='chip'>added: {html.escape(format_timestamp(row['first_synced_at']))}</span>")
+
+    timing_bits = []
+    if row["last_synced_at"]:
+        timing_bits.append(f"last synced {html.escape(format_timestamp(row['last_synced_at']))}")
+    elif row["manual"]:
+        timing_bits.append("manual listing")
+    if row["updated_at"]:
+        timing_bits.append(f"updated {html.escape(format_timestamp(row['updated_at']))}")
 
     return f"""
     <div class="card listing">
@@ -559,6 +641,7 @@ def render_listing_card(row: sqlite3.Row) -> str:
       </div>
       <div class="chipbar">{''.join(chips)}</div>
       <div class="mini"><a href="{url}" target="_blank" rel="noreferrer">Open source listing</a></div>
+      <div class="mini">{' · '.join(timing_bits)}</div>
       <div class="note">{notes or 'No notes yet.'}</div>
     </div>
     """
@@ -566,19 +649,34 @@ def render_listing_card(row: sqlite3.Row) -> str:
 
 def render_dashboard(view: str, flash: str = "") -> bytes:
     rows = fetch_listings(view)
+    latest_sync = fetch_latest_sync_run()
     cards = "".join(render_listing_card(row) for row in rows) or '<div class="card empty">No listings here yet.</div>'
     flash_html = f'<div class="card">{html.escape(flash)}</div>' if flash else ""
+    if latest_sync:
+        latest_sync_html = (
+            f"<div class='card'>"
+            f"<strong>Last sync</strong><br>"
+            f"{html.escape(format_timestamp(latest_sync['finished_at'] or latest_sync['started_at']))}"
+            f"<br><span class='note'>{html.escape(latest_sync['summary'])}"
+            f"{' • ' + html.escape(latest_sync['status']) if latest_sync['status'] else ''}"
+            f"{' • ' + html.escape(latest_sync['error_text']) if latest_sync['error_text'] else ''}"
+            f"</span></div>"
+        )
+    else:
+        latest_sync_html = "<div class='card'><strong>Last sync</strong><br><span class='note'>No sync has run yet.</span></div>"
     body = f"""
     {flash_html}
     <div class="grid">
       <div class="stack">{cards}</div>
       <div class="stack">
+        {latest_sync_html}
         <div class="card">
           <h3 style="margin-top:0">Sync automated listings</h3>
           <p class="note">Pull fresh Richmond results from Rentcast and Furnished Finder, then score them into the dashboard.</p>
-          <form method="post" action="/sync">
+          <form method="post" action="/sync" onsubmit="const btn=this.querySelector('[data-sync-button]'); if(btn){{btn.disabled=true; btn.dataset.original=btn.textContent; btn.textContent='Syncing...';}};">
             <input type="hidden" name="view" value="{html.escape(view)}">
-            <button type="submit">Run Automated Sync</button>
+            <button type="submit" data-sync-button>Run Automated Sync</button>
+            <div class="note">The button will switch to “Syncing...” while the request is running.</div>
           </form>
         </div>
         <div class="card">
@@ -653,6 +751,14 @@ def render_listing_detail(row: sqlite3.Row, flash: str = "") -> bytes:
           <div class="row" style="margin-top:14px">
             <div><strong>Parking</strong><br>{html.escape(row['parking'] or 'Unknown')}</div>
             <div><strong>Laundry</strong><br>{html.escape(row['laundry'] or 'Unknown')}</div>
+          </div>
+          <div class="row" style="margin-top:14px">
+            <div><strong>Added by sync</strong><br>{html.escape(format_timestamp(row['first_synced_at'])) if row['first_synced_at'] else 'Not tracked yet'}</div>
+            <div><strong>Last synced</strong><br>{html.escape(format_timestamp(row['last_synced_at'])) if row['last_synced_at'] else 'Manual / not synced yet'}</div>
+          </div>
+          <div class="row" style="margin-top:14px">
+            <div><strong>Last updated</strong><br>{html.escape(format_timestamp(row['updated_at']))}</div>
+            <div><strong>Created</strong><br>{html.escape(format_timestamp(row['created_at']))}</div>
           </div>
         </div>
       </div>
@@ -778,15 +884,24 @@ class RentalHandler(BaseHTTPRequestHandler):
         form = self.parse_form()
 
         if path == "/sync":
-            counts = sync_all_sources()
-            if counts:
-                summary = ", ".join(
-                    f"{count} {source.replace('_', ' ').title()} listings"
-                    for source, count in sorted(counts.items())
-                )
-            else:
-                summary = "0 listings"
-            self.send_html(render_dashboard(form.get("view", "inbox"), flash=f"Synced {summary}."))
+            started_at = now_iso()
+            view = form.get("view", "inbox")
+            try:
+                counts = sync_all_sources()
+                if counts:
+                    summary = ", ".join(
+                        f"{count} {source.replace('_', ' ').title()} listings"
+                        for source, count in sorted(counts.items())
+                    )
+                else:
+                    summary = "0 listings"
+                total_count = sum(counts.values())
+                record_sync_run(started_at, "success", total_count, summary)
+                self.send_html(render_dashboard(view, flash=f"Sync complete: {summary}."))
+            except Exception as exc:
+                error_text = str(exc)
+                record_sync_run(started_at, "error", 0, "Sync failed", error_text=error_text)
+                self.send_html(render_dashboard(view, flash=f"Sync failed: {error_text}."), status=500)
             return
 
         if path == "/manual":
