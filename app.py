@@ -29,6 +29,7 @@ BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / DB_FILE
 VALID_STATUSES = ["new", "maybe", "good", "contacted", "toured", "pass"]
 VALID_TRI_STATE = ["unknown", "yes", "maybe", "no"]
+SHORTLIST_STATUSES = {"good", "contacted", "toured"}
 
 
 def now_iso() -> str:
@@ -43,6 +44,10 @@ def format_timestamp(value: Optional[str]) -> str:
     except ValueError:
         return value
     return dt.strftime("%b %-d, %Y at %-I:%M %p")
+
+
+def is_shortlisted_status(status: Optional[str]) -> bool:
+    return (status or "").lower() in SHORTLIST_STATUSES
 
 
 def get_db() -> sqlite3.Connection:
@@ -429,10 +434,10 @@ def fetch_listing(listing_id: int) -> Optional[sqlite3.Row]:
     return row
 
 
-def update_listing(listing_id: int, form: dict[str, str]) -> None:
+def update_listing(listing_id: int, form: dict[str, str]) -> str:
     row = fetch_listing(listing_id)
     if not row:
-        return
+        return "Listing not found."
     updated = dict(row)
     quick_action = form.get("quick_action", "").lower()
     updated["status"] = form.get("status", updated["status"]).lower()
@@ -444,9 +449,17 @@ def update_listing(listing_id: int, form: dict[str, str]) -> None:
     updated["parking"] = form.get("parking", updated["parking"])
     updated["laundry"] = form.get("laundry", updated["laundry"])
     updated["hidden"] = form.get("hidden") == "1"
+    flash = "Listing updated."
     if quick_action == "shortlist":
         updated["status"] = "good"
         updated["hidden"] = False
+        flash = "Added to shortlist."
+    elif quick_action == "hide":
+        updated["hidden"] = True
+        flash = "Listing hidden."
+    elif quick_action == "unhide":
+        updated["hidden"] = False
+        flash = "Listing unhidden."
     updated["score"] = compute_score(updated)
     updated["updated_at"] = now_iso()
 
@@ -476,6 +489,7 @@ def update_listing(listing_id: int, form: dict[str, str]) -> None:
     )
     conn.commit()
     conn.close()
+    return flash
 
 
 def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
@@ -535,6 +549,18 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
     .listing-head {{ display:flex; justify-content:space-between; gap:12px; align-items:start; }}
     .listing h3 {{ margin:0; font-size:1.15rem; }}
     .meta, .mini {{ color: var(--muted); font-size:.96rem; }}
+    .quick-actions {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
+    .quick-actions form {{ display:block; }}
+    .quick-actions button {{ padding:8px 12px; }}
+    .button-quiet {{
+      background: #f4efe4;
+      color: var(--ink);
+      border-color: var(--line);
+    }}
+    .button-quiet[disabled] {{
+      opacity: .7;
+      cursor: default;
+    }}
     .chipbar {{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }}
     .chip {{
       padding:6px 10px; border-radius:999px; background:var(--accent-soft);
@@ -592,7 +618,7 @@ def render_layout(title: str, body: str, active: str = "inbox") -> bytes:
     return html_doc.encode("utf-8")
 
 
-def render_listing_card(row: sqlite3.Row) -> str:
+def render_listing_card(row: sqlite3.Row, view: str) -> str:
     title = html.escape(row["title"] or row["address"] or "Untitled listing")
     address = html.escape(row["address"] or "")
     url = html.escape(row["url"] or "#")
@@ -629,6 +655,27 @@ def render_listing_card(row: sqlite3.Row) -> str:
     if row["updated_at"]:
         timing_bits.append(f"updated {html.escape(format_timestamp(row['updated_at']))}")
 
+    shortlist_button = (
+        "<button type='button' class='button-secondary' disabled>Shortlisted</button>"
+        if is_shortlisted_status(row["status"])
+        else (
+            f"<form method='post' action='/listing/update'>"
+            f"<input type='hidden' name='id' value='{row['id']}'>"
+            f"<input type='hidden' name='view' value='{html.escape(view)}'>"
+            f"<button type='submit' name='quick_action' value='shortlist' class='button-secondary'>Shortlist</button>"
+            f"</form>"
+        )
+    )
+    visibility_action = "unhide" if row["hidden"] else "hide"
+    visibility_label = "Unhide" if row["hidden"] else "Hide"
+    visibility_button = (
+        f"<form method='post' action='/listing/update'>"
+        f"<input type='hidden' name='id' value='{row['id']}'>"
+        f"<input type='hidden' name='view' value='{html.escape(view)}'>"
+        f"<button type='submit' name='quick_action' value='{visibility_action}' class='button-quiet'>{visibility_label}</button>"
+        f"</form>"
+    )
+
     return f"""
     <div class="card listing">
       <div class="listing-head">
@@ -642,6 +689,7 @@ def render_listing_card(row: sqlite3.Row) -> str:
       <div class="chipbar">{''.join(chips)}</div>
       <div class="mini"><a href="{url}" target="_blank" rel="noreferrer">Open source listing</a></div>
       <div class="mini">{' · '.join(timing_bits)}</div>
+      <div class="quick-actions">{shortlist_button}{visibility_button}</div>
       <div class="note">{notes or 'No notes yet.'}</div>
     </div>
     """
@@ -650,7 +698,7 @@ def render_listing_card(row: sqlite3.Row) -> str:
 def render_dashboard(view: str, flash: str = "") -> bytes:
     rows = fetch_listings(view)
     latest_sync = fetch_latest_sync_run()
-    cards = "".join(render_listing_card(row) for row in rows) or '<div class="card empty">No listings here yet.</div>'
+    cards = "".join(render_listing_card(row, view) for row in rows) or '<div class="card empty">No listings here yet.</div>'
     flash_html = f'<div class="card">{html.escape(flash)}</div>' if flash else ""
     if latest_sync:
         latest_sync_html = (
@@ -928,9 +976,13 @@ class RentalHandler(BaseHTTPRequestHandler):
         if path == "/listing/update":
             listing_id = form.get("id", "")
             if listing_id.isdigit():
-                update_listing(int(listing_id), form)
+                flash = update_listing(int(listing_id), form)
+                view = form.get("view", "").lower()
+                if view in {"inbox", "shortlist", "hidden"}:
+                    self.send_html(render_dashboard(view, flash=flash))
+                    return
                 row = fetch_listing(int(listing_id))
-                self.send_html(render_listing_detail(row, flash="Listing updated."))
+                self.send_html(render_listing_detail(row, flash=flash))
                 return
             self.send_html(render_layout("Error", '<div class="card">Bad listing id.</div>'), status=400)
             return
